@@ -1,0 +1,94 @@
+name: Build unsigned HouseCapture IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/house-capture/**'
+      - '.github/workflows/house-capture-ipa.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: house-capture-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Release iPhone IPA (unsigned)
+    runs-on: xcode-27
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: apps/house-capture
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up XcodeGen
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+      - name: Build Release for a physical iPhone
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          xcodebuild -project HouseCapture.xcodeproj -scheme HouseCapture -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build/DerivedData -resultBundlePath build/HouseCapture.xcresult CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" ARCHS=arm64 ONLY_ACTIVE_ARCH=NO build 2>&1 | tee build/xcodebuild.log
+      - name: Validate and package unsigned IPA
+        run: |
+          set -euo pipefail
+          app="build/DerivedData/Build/Products/Release-iphoneos/HouseCapture.app"
+          test -d "$app"
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Info.plist")
+          test -f "$app/$executable"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleSupportedPlatforms:0' "$app/Info.plist")" = "iPhoneOS"
+          xcrun lipo -verify_arch arm64 "$app/$executable"
+          mkdir -p build/package/Payload build/artifacts
+          ditto "$app" build/package/Payload/HouseCapture.app
+          (cd build/package && /usr/bin/zip -qry ../artifacts/HouseCapture-unsigned.ipa Payload)
+          unzip -t build/artifacts/HouseCapture-unsigned.ipa
+          shasum -a 256 build/artifacts/HouseCapture-unsigned.ipa > build/artifacts/SHA256SUMS.txt
+          {
+            echo "Source commit: $GITHUB_SHA"
+            xcodebuild -version
+            xcodegen --version
+            echo "Release / iphoneos / arm64 / iOS 17+"
+            echo "Unsigned: must be signed and provisioned for your iPhone before installation."
+            echo "On Windows, use a compatible sideloading tool with your Apple account."
+            echo "Free provisioning usually expires after 7 days; refresh before expiry."
+          } > build/artifacts/BUILD-INFO.txt
+          {
+            echo "### HouseCapture unsigned IPA"
+            echo "Download the HouseCapture-unsigned artifact and extract the ZIP."
+            echo "The IPA requires signing and device provisioning before installation."
+            echo "No Apple credentials or signing certificates were used by this workflow."
+            echo "Source: $GITHUB_SHA"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: HouseCapture-unsigned
+          path: apps/house-capture/build/artifacts/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: HouseCapture-build-diagnostics
+          path: |
+            apps/house-capture/build/xcodebuild.log
+            apps/house-capture/build/HouseCapture.xcresult
+          if-no-files-found: ignore
+          retention-days: 7
